@@ -13838,4 +13838,1179 @@ var TimeGridEventRenderer = /** @class */ (function (_super) {
                 '') +
             '</div>' +
             '<div class="fc-bg"/>' +
-            /* TODO: write CSS for thi
+            /* TODO: write CSS for this
+            (isResizableFromStart ?
+              '<div class="fc-resizer fc-start-resizer" />' :
+              ''
+              ) +
+            */
+            (isResizableFromEnd ?
+                '<div class="fc-resizer fc-end-resizer" />' :
+                '') +
+            '</a>';
+    };
+    // Given segments that are assumed to all live in the *same column*,
+    // compute their verical/horizontal coordinates and assign to their elements.
+    TimeGridEventRenderer.prototype.updateFgSegCoords = function (segs) {
+        this.timeGrid.computeSegVerticals(segs); // horizontals relies on this
+        this.computeFgSegHorizontals(segs); // compute horizontal coordinates, z-index's, and reorder the array
+        this.timeGrid.assignSegVerticals(segs);
+        this.assignFgSegHorizontals(segs);
+    };
+    // Given an array of segments that are all in the same column, sets the backwardCoord and forwardCoord on each.
+    // NOTE: Also reorders the given array by date!
+    TimeGridEventRenderer.prototype.computeFgSegHorizontals = function (segs) {
+        var levels;
+        var level0;
+        var i;
+        this.sortEventSegs(segs); // order by certain criteria
+        levels = buildSlotSegLevels(segs);
+        computeForwardSlotSegs(levels);
+        if ((level0 = levels[0])) {
+            for (i = 0; i < level0.length; i++) {
+                computeSlotSegPressures(level0[i]);
+            }
+            for (i = 0; i < level0.length; i++) {
+                this.computeFgSegForwardBack(level0[i], 0, 0);
+            }
+        }
+    };
+    // Calculate seg.forwardCoord and seg.backwardCoord for the segment, where both values range
+    // from 0 to 1. If the calendar is left-to-right, the seg.backwardCoord maps to "left" and
+    // seg.forwardCoord maps to "right" (via percentage). Vice-versa if the calendar is right-to-left.
+    //
+    // The segment might be part of a "series", which means consecutive segments with the same pressure
+    // who's width is unknown until an edge has been hit. `seriesBackwardPressure` is the number of
+    // segments behind this one in the current series, and `seriesBackwardCoord` is the starting
+    // coordinate of the first segment in the series.
+    TimeGridEventRenderer.prototype.computeFgSegForwardBack = function (seg, seriesBackwardPressure, seriesBackwardCoord) {
+        var forwardSegs = seg.forwardSegs;
+        var i;
+        if (seg.forwardCoord === undefined) {
+            if (!forwardSegs.length) {
+                // if there are no forward segments, this segment should butt up against the edge
+                seg.forwardCoord = 1;
+            }
+            else {
+                // sort highest pressure first
+                this.sortForwardSegs(forwardSegs);
+                // this segment's forwardCoord will be calculated from the backwardCoord of the
+                // highest-pressure forward segment.
+                this.computeFgSegForwardBack(forwardSegs[0], seriesBackwardPressure + 1, seriesBackwardCoord);
+                seg.forwardCoord = forwardSegs[0].backwardCoord;
+            }
+            // calculate the backwardCoord from the forwardCoord. consider the series
+            seg.backwardCoord = seg.forwardCoord -
+                (seg.forwardCoord - seriesBackwardCoord) / // available width for series
+                    (seriesBackwardPressure + 1); // # of segments in the series
+            // use this segment's coordinates to computed the coordinates of the less-pressurized
+            // forward segments
+            for (i = 0; i < forwardSegs.length; i++) {
+                this.computeFgSegForwardBack(forwardSegs[i], 0, seg.forwardCoord);
+            }
+        }
+    };
+    TimeGridEventRenderer.prototype.sortForwardSegs = function (forwardSegs) {
+        forwardSegs.sort(util_1.proxy(this, 'compareForwardSegs'));
+    };
+    // A cmp function for determining which forward segment to rely on more when computing coordinates.
+    TimeGridEventRenderer.prototype.compareForwardSegs = function (seg1, seg2) {
+        // put higher-pressure first
+        return seg2.forwardPressure - seg1.forwardPressure ||
+            // put segments that are closer to initial edge first (and favor ones with no coords yet)
+            (seg1.backwardCoord || 0) - (seg2.backwardCoord || 0) ||
+            // do normal sorting...
+            this.compareEventSegs(seg1, seg2);
+    };
+    // Given foreground event segments that have already had their position coordinates computed,
+    // assigns position-related CSS values to their elements.
+    TimeGridEventRenderer.prototype.assignFgSegHorizontals = function (segs) {
+        var i;
+        var seg;
+        for (i = 0; i < segs.length; i++) {
+            seg = segs[i];
+            seg.el.css(this.generateFgSegHorizontalCss(seg));
+            // if the height is short, add a className for alternate styling
+            if (seg.bottom - seg.top < 30) {
+                seg.el.addClass('fc-short');
+            }
+        }
+    };
+    // Generates an object with CSS properties/values that should be applied to an event segment element.
+    // Contains important positioning-related properties that should be applied to any event element, customized or not.
+    TimeGridEventRenderer.prototype.generateFgSegHorizontalCss = function (seg) {
+        var shouldOverlap = this.opt('slotEventOverlap');
+        var backwardCoord = seg.backwardCoord; // the left side if LTR. the right side if RTL. floating-point
+        var forwardCoord = seg.forwardCoord; // the right side if LTR. the left side if RTL. floating-point
+        var props = this.timeGrid.generateSegVerticalCss(seg); // get top/bottom first
+        var isRTL = this.timeGrid.isRTL;
+        var left; // amount of space from left edge, a fraction of the total width
+        var right; // amount of space from right edge, a fraction of the total width
+        if (shouldOverlap) {
+            // double the width, but don't go beyond the maximum forward coordinate (1.0)
+            forwardCoord = Math.min(1, backwardCoord + (forwardCoord - backwardCoord) * 2);
+        }
+        if (isRTL) {
+            left = 1 - forwardCoord;
+            right = backwardCoord;
+        }
+        else {
+            left = backwardCoord;
+            right = 1 - forwardCoord;
+        }
+        props.zIndex = seg.level + 1; // convert from 0-base to 1-based
+        props.left = left * 100 + '%';
+        props.right = right * 100 + '%';
+        if (shouldOverlap && seg.forwardPressure) {
+            // add padding to the edge so that forward stacked events don't cover the resizer's icon
+            props[isRTL ? 'marginLeft' : 'marginRight'] = 10 * 2; // 10 is a guesstimate of the icon's width
+        }
+        return props;
+    };
+    return TimeGridEventRenderer;
+}(EventRenderer_1.default));
+exports.default = TimeGridEventRenderer;
+// Builds an array of segments "levels". The first level will be the leftmost tier of segments if the calendar is
+// left-to-right, or the rightmost if the calendar is right-to-left. Assumes the segments are already ordered by date.
+function buildSlotSegLevels(segs) {
+    var levels = [];
+    var i;
+    var seg;
+    var j;
+    for (i = 0; i < segs.length; i++) {
+        seg = segs[i];
+        // go through all the levels and stop on the first level where there are no collisions
+        for (j = 0; j < levels.length; j++) {
+            if (!computeSlotSegCollisions(seg, levels[j]).length) {
+                break;
+            }
+        }
+        seg.level = j;
+        (levels[j] || (levels[j] = [])).push(seg);
+    }
+    return levels;
+}
+// For every segment, figure out the other segments that are in subsequent
+// levels that also occupy the same vertical space. Accumulate in seg.forwardSegs
+function computeForwardSlotSegs(levels) {
+    var i;
+    var level;
+    var j;
+    var seg;
+    var k;
+    for (i = 0; i < levels.length; i++) {
+        level = levels[i];
+        for (j = 0; j < level.length; j++) {
+            seg = level[j];
+            seg.forwardSegs = [];
+            for (k = i + 1; k < levels.length; k++) {
+                computeSlotSegCollisions(seg, levels[k], seg.forwardSegs);
+            }
+        }
+    }
+}
+// Figure out which path forward (via seg.forwardSegs) results in the longest path until
+// the furthest edge is reached. The number of segments in this path will be seg.forwardPressure
+function computeSlotSegPressures(seg) {
+    var forwardSegs = seg.forwardSegs;
+    var forwardPressure = 0;
+    var i;
+    var forwardSeg;
+    if (seg.forwardPressure === undefined) {
+        for (i = 0; i < forwardSegs.length; i++) {
+            forwardSeg = forwardSegs[i];
+            // figure out the child's maximum forward path
+            computeSlotSegPressures(forwardSeg);
+            // either use the existing maximum, or use the child's forward pressure
+            // plus one (for the forwardSeg itself)
+            forwardPressure = Math.max(forwardPressure, 1 + forwardSeg.forwardPressure);
+        }
+        seg.forwardPressure = forwardPressure;
+    }
+}
+// Find all the segments in `otherSegs` that vertically collide with `seg`.
+// Append into an optionally-supplied `results` array and return.
+function computeSlotSegCollisions(seg, otherSegs, results) {
+    if (results === void 0) { results = []; }
+    for (var i = 0; i < otherSegs.length; i++) {
+        if (isSlotSegCollision(seg, otherSegs[i])) {
+            results.push(otherSegs[i]);
+        }
+    }
+    return results;
+}
+// Do these segments occupy the same vertical space?
+function isSlotSegCollision(seg1, seg2) {
+    return seg1.bottom > seg2.top && seg1.top < seg2.bottom;
+}
+
+
+/***/ }),
+/* 247 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var $ = __webpack_require__(3);
+var HelperRenderer_1 = __webpack_require__(58);
+var TimeGridHelperRenderer = /** @class */ (function (_super) {
+    tslib_1.__extends(TimeGridHelperRenderer, _super);
+    function TimeGridHelperRenderer() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    TimeGridHelperRenderer.prototype.renderSegs = function (segs, sourceSeg) {
+        var helperNodes = [];
+        var i;
+        var seg;
+        var sourceEl;
+        // TODO: not good to call eventRenderer this way
+        this.eventRenderer.renderFgSegsIntoContainers(segs, this.component.helperContainerEls);
+        // Try to make the segment that is in the same row as sourceSeg look the same
+        for (i = 0; i < segs.length; i++) {
+            seg = segs[i];
+            if (sourceSeg && sourceSeg.col === seg.col) {
+                sourceEl = sourceSeg.el;
+                seg.el.css({
+                    left: sourceEl.css('left'),
+                    right: sourceEl.css('right'),
+                    'margin-left': sourceEl.css('margin-left'),
+                    'margin-right': sourceEl.css('margin-right')
+                });
+            }
+            helperNodes.push(seg.el[0]);
+        }
+        return $(helperNodes); // must return the elements rendered
+    };
+    return TimeGridHelperRenderer;
+}(HelperRenderer_1.default));
+exports.default = TimeGridHelperRenderer;
+
+
+/***/ }),
+/* 248 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var FillRenderer_1 = __webpack_require__(57);
+var TimeGridFillRenderer = /** @class */ (function (_super) {
+    tslib_1.__extends(TimeGridFillRenderer, _super);
+    function TimeGridFillRenderer() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    TimeGridFillRenderer.prototype.attachSegEls = function (type, segs) {
+        var timeGrid = this.component;
+        var containerEls;
+        // TODO: more efficient lookup
+        if (type === 'bgEvent') {
+            containerEls = timeGrid.bgContainerEls;
+        }
+        else if (type === 'businessHours') {
+            containerEls = timeGrid.businessContainerEls;
+        }
+        else if (type === 'highlight') {
+            containerEls = timeGrid.highlightContainerEls;
+        }
+        timeGrid.updateSegVerticals(segs);
+        timeGrid.attachSegsByCol(timeGrid.groupSegsByCol(segs), containerEls);
+        return segs.map(function (seg) {
+            return seg.el[0];
+        });
+    };
+    return TimeGridFillRenderer;
+}(FillRenderer_1.default));
+exports.default = TimeGridFillRenderer;
+
+
+/***/ }),
+/* 249 */
+/***/ (function(module, exports, __webpack_require__) {
+
+/* A rectangular panel that is absolutely positioned over other content
+------------------------------------------------------------------------------------------------------------------------
+Options:
+  - className (string)
+  - content (HTML string or jQuery element set)
+  - parentEl
+  - top
+  - left
+  - right (the x coord of where the right edge should be. not a "CSS" right)
+  - autoHide (boolean)
+  - show (callback)
+  - hide (callback)
+*/
+Object.defineProperty(exports, "__esModule", { value: true });
+var $ = __webpack_require__(3);
+var util_1 = __webpack_require__(4);
+var ListenerMixin_1 = __webpack_require__(7);
+var Popover = /** @class */ (function () {
+    function Popover(options) {
+        this.isHidden = true;
+        this.margin = 10; // the space required between the popover and the edges of the scroll container
+        this.options = options || {};
+    }
+    // Shows the popover on the specified position. Renders it if not already
+    Popover.prototype.show = function () {
+        if (this.isHidden) {
+            if (!this.el) {
+                this.render();
+            }
+            this.el.show();
+            this.position();
+            this.isHidden = false;
+            this.trigger('show');
+        }
+    };
+    // Hides the popover, through CSS, but does not remove it from the DOM
+    Popover.prototype.hide = function () {
+        if (!this.isHidden) {
+            this.el.hide();
+            this.isHidden = true;
+            this.trigger('hide');
+        }
+    };
+    // Creates `this.el` and renders content inside of it
+    Popover.prototype.render = function () {
+        var _this = this;
+        var options = this.options;
+        this.el = $('<div class="fc-popover"/>')
+            .addClass(options.className || '')
+            .css({
+            // position initially to the top left to avoid creating scrollbars
+            top: 0,
+            left: 0
+        })
+            .append(options.content)
+            .appendTo(options.parentEl);
+        // when a click happens on anything inside with a 'fc-close' className, hide the popover
+        this.el.on('click', '.fc-close', function () {
+            _this.hide();
+        });
+        if (options.autoHide) {
+            this.listenTo($(document), 'mousedown', this.documentMousedown);
+        }
+    };
+    // Triggered when the user clicks *anywhere* in the document, for the autoHide feature
+    Popover.prototype.documentMousedown = function (ev) {
+        // only hide the popover if the click happened outside the popover
+        if (this.el && !$(ev.target).closest(this.el).length) {
+            this.hide();
+        }
+    };
+    // Hides and unregisters any handlers
+    Popover.prototype.removeElement = function () {
+        this.hide();
+        if (this.el) {
+            this.el.remove();
+            this.el = null;
+        }
+        this.stopListeningTo($(document), 'mousedown');
+    };
+    // Positions the popover optimally, using the top/left/right options
+    Popover.prototype.position = function () {
+        var options = this.options;
+        var origin = this.el.offsetParent().offset();
+        var width = this.el.outerWidth();
+        var height = this.el.outerHeight();
+        var windowEl = $(window);
+        var viewportEl = util_1.getScrollParent(this.el);
+        var viewportTop;
+        var viewportLeft;
+        var viewportOffset;
+        var top; // the "position" (not "offset") values for the popover
+        var left; //
+        // compute top and left
+        top = options.top || 0;
+        if (options.left !== undefined) {
+            left = options.left;
+        }
+        else if (options.right !== undefined) {
+            left = options.right - width; // derive the left value from the right value
+        }
+        else {
+            left = 0;
+        }
+        if (viewportEl.is(window) || viewportEl.is(document)) {
+            viewportEl = windowEl;
+            viewportTop = 0; // the window is always at the top left
+            viewportLeft = 0; // (and .offset() won't work if called here)
+        }
+        else {
+            viewportOffset = viewportEl.offset();
+            viewportTop = viewportOffset.top;
+            viewportLeft = viewportOffset.left;
+        }
+        // if the window is scrolled, it causes the visible area to be further down
+        viewportTop += windowEl.scrollTop();
+        viewportLeft += windowEl.scrollLeft();
+        // constrain to the view port. if constrained by two edges, give precedence to top/left
+        if (options.viewportConstrain !== false) {
+            top = Math.min(top, viewportTop + viewportEl.outerHeight() - height - this.margin);
+            top = Math.max(top, viewportTop + this.margin);
+            left = Math.min(left, viewportLeft + viewportEl.outerWidth() - width - this.margin);
+            left = Math.max(left, viewportLeft + this.margin);
+        }
+        this.el.css({
+            top: top - origin.top,
+            left: left - origin.left
+        });
+    };
+    // Triggers a callback. Calls a function in the option hash of the same name.
+    // Arguments beyond the first `name` are forwarded on.
+    // TODO: better code reuse for this. Repeat code
+    Popover.prototype.trigger = function (name) {
+        if (this.options[name]) {
+            this.options[name].apply(this, Array.prototype.slice.call(arguments, 1));
+        }
+    };
+    return Popover;
+}());
+exports.default = Popover;
+ListenerMixin_1.default.mixInto(Popover);
+
+
+/***/ }),
+/* 250 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var $ = __webpack_require__(3);
+var util_1 = __webpack_require__(4);
+var EventRenderer_1 = __webpack_require__(42);
+/* Event-rendering methods for the DayGrid class
+----------------------------------------------------------------------------------------------------------------------*/
+var DayGridEventRenderer = /** @class */ (function (_super) {
+    tslib_1.__extends(DayGridEventRenderer, _super);
+    function DayGridEventRenderer(dayGrid, fillRenderer) {
+        var _this = _super.call(this, dayGrid, fillRenderer) || this;
+        _this.dayGrid = dayGrid;
+        return _this;
+    }
+    DayGridEventRenderer.prototype.renderBgRanges = function (eventRanges) {
+        // don't render timed background events
+        eventRanges = $.grep(eventRanges, function (eventRange) {
+            return eventRange.eventDef.isAllDay();
+        });
+        _super.prototype.renderBgRanges.call(this, eventRanges);
+    };
+    // Renders the given foreground event segments onto the grid
+    DayGridEventRenderer.prototype.renderFgSegs = function (segs) {
+        var rowStructs = this.rowStructs = this.renderSegRows(segs);
+        // append to each row's content skeleton
+        this.dayGrid.rowEls.each(function (i, rowNode) {
+            $(rowNode).find('.fc-content-skeleton > table').append(rowStructs[i].tbodyEl);
+        });
+    };
+    // Unrenders all currently rendered foreground event segments
+    DayGridEventRenderer.prototype.unrenderFgSegs = function () {
+        var rowStructs = this.rowStructs || [];
+        var rowStruct;
+        while ((rowStruct = rowStructs.pop())) {
+            rowStruct.tbodyEl.remove();
+        }
+        this.rowStructs = null;
+    };
+    // Uses the given events array to generate <tbody> elements that should be appended to each row's content skeleton.
+    // Returns an array of rowStruct objects (see the bottom of `renderSegRow`).
+    // PRECONDITION: each segment shoud already have a rendered and assigned `.el`
+    DayGridEventRenderer.prototype.renderSegRows = function (segs) {
+        var rowStructs = [];
+        var segRows;
+        var row;
+        segRows = this.groupSegRows(segs); // group into nested arrays
+        // iterate each row of segment groupings
+        for (row = 0; row < segRows.length; row++) {
+            rowStructs.push(this.renderSegRow(row, segRows[row]));
+        }
+        return rowStructs;
+    };
+    // Given a row # and an array of segments all in the same row, render a <tbody> element, a skeleton that contains
+    // the segments. Returns object with a bunch of internal data about how the render was calculated.
+    // NOTE: modifies rowSegs
+    DayGridEventRenderer.prototype.renderSegRow = function (row, rowSegs) {
+        var colCnt = this.dayGrid.colCnt;
+        var segLevels = this.buildSegLevels(rowSegs); // group into sub-arrays of levels
+        var levelCnt = Math.max(1, segLevels.length); // ensure at least one level
+        var tbody = $('<tbody/>');
+        var segMatrix = []; // lookup for which segments are rendered into which level+col cells
+        var cellMatrix = []; // lookup for all <td> elements of the level+col matrix
+        var loneCellMatrix = []; // lookup for <td> elements that only take up a single column
+        var i;
+        var levelSegs;
+        var col;
+        var tr;
+        var j;
+        var seg;
+        var td;
+        // populates empty cells from the current column (`col`) to `endCol`
+        function emptyCellsUntil(endCol) {
+            while (col < endCol) {
+                // try to grab a cell from the level above and extend its rowspan. otherwise, create a fresh cell
+                td = (loneCellMatrix[i - 1] || [])[col];
+                if (td) {
+                    td.attr('rowspan', parseInt(td.attr('rowspan') || 1, 10) + 1);
+                }
+                else {
+                    td = $('<td/>');
+                    tr.append(td);
+                }
+                cellMatrix[i][col] = td;
+                loneCellMatrix[i][col] = td;
+                col++;
+            }
+        }
+        for (i = 0; i < levelCnt; i++) {
+            levelSegs = segLevels[i];
+            col = 0;
+            tr = $('<tr/>');
+            segMatrix.push([]);
+            cellMatrix.push([]);
+            loneCellMatrix.push([]);
+            // levelCnt might be 1 even though there are no actual levels. protect against this.
+            // this single empty row is useful for styling.
+            if (levelSegs) {
+                for (j = 0; j < levelSegs.length; j++) {
+                    seg = levelSegs[j];
+                    emptyCellsUntil(seg.leftCol);
+                    // create a container that occupies or more columns. append the event element.
+                    td = $('<td class="fc-event-container"/>').append(seg.el);
+                    if (seg.leftCol !== seg.rightCol) {
+                        td.attr('colspan', seg.rightCol - seg.leftCol + 1);
+                    }
+                    else {
+                        loneCellMatrix[i][col] = td;
+                    }
+                    while (col <= seg.rightCol) {
+                        cellMatrix[i][col] = td;
+                        segMatrix[i][col] = seg;
+                        col++;
+                    }
+                    tr.append(td);
+                }
+            }
+            emptyCellsUntil(colCnt); // finish off the row
+            this.dayGrid.bookendCells(tr);
+            tbody.append(tr);
+        }
+        return {
+            row: row,
+            tbodyEl: tbody,
+            cellMatrix: cellMatrix,
+            segMatrix: segMatrix,
+            segLevels: segLevels,
+            segs: rowSegs
+        };
+    };
+    // Stacks a flat array of segments, which are all assumed to be in the same row, into subarrays of vertical levels.
+    // NOTE: modifies segs
+    DayGridEventRenderer.prototype.buildSegLevels = function (segs) {
+        var levels = [];
+        var i;
+        var seg;
+        var j;
+        // Give preference to elements with certain criteria, so they have
+        // a chance to be closer to the top.
+        this.sortEventSegs(segs);
+        for (i = 0; i < segs.length; i++) {
+            seg = segs[i];
+            // loop through levels, starting with the topmost, until the segment doesn't collide with other segments
+            for (j = 0; j < levels.length; j++) {
+                if (!isDaySegCollision(seg, levels[j])) {
+                    break;
+                }
+            }
+            // `j` now holds the desired subrow index
+            seg.level = j;
+            // create new level array if needed and append segment
+            (levels[j] || (levels[j] = [])).push(seg);
+        }
+        // order segments left-to-right. very important if calendar is RTL
+        for (j = 0; j < levels.length; j++) {
+            levels[j].sort(compareDaySegCols);
+        }
+        return levels;
+    };
+    // Given a flat array of segments, return an array of sub-arrays, grouped by each segment's row
+    DayGridEventRenderer.prototype.groupSegRows = function (segs) {
+        var segRows = [];
+        var i;
+        for (i = 0; i < this.dayGrid.rowCnt; i++) {
+            segRows.push([]);
+        }
+        for (i = 0; i < segs.length; i++) {
+            segRows[segs[i].row].push(segs[i]);
+        }
+        return segRows;
+    };
+    // Computes a default event time formatting string if `timeFormat` is not explicitly defined
+    DayGridEventRenderer.prototype.computeEventTimeFormat = function () {
+        return this.opt('extraSmallTimeFormat'); // like "6p" or "6:30p"
+    };
+    // Computes a default `displayEventEnd` value if one is not expliclty defined
+    DayGridEventRenderer.prototype.computeDisplayEventEnd = function () {
+        return this.dayGrid.colCnt === 1; // we'll likely have space if there's only one day
+    };
+    // Builds the HTML to be used for the default element for an individual segment
+    DayGridEventRenderer.prototype.fgSegHtml = function (seg, disableResizing) {
+        var view = this.view;
+        var eventDef = seg.footprint.eventDef;
+        var isAllDay = seg.footprint.componentFootprint.isAllDay;
+        var isDraggable = view.isEventDefDraggable(eventDef);
+        var isResizableFromStart = !disableResizing && isAllDay &&
+            seg.isStart && view.isEventDefResizableFromStart(eventDef);
+        var isResizableFromEnd = !disableResizing && isAllDay &&
+            seg.isEnd && view.isEventDefResizableFromEnd(eventDef);
+        var classes = this.getSegClasses(seg, isDraggable, isResizableFromStart || isResizableFromEnd);
+        var skinCss = util_1.cssToStr(this.getSkinCss(eventDef));
+        var timeHtml = '';
+        var timeText;
+        var titleHtml;
+        classes.unshift('fc-day-grid-event', 'fc-h-event');
+        // Only display a timed events time if it is the starting segment
+        if (seg.isStart) {
+            timeText = this.getTimeText(seg.footprint);
+            if (timeText) {
+                timeHtml = '<span class="fc-time">' + util_1.htmlEscape(timeText) + '</span>';
+            }
+        }
+        titleHtml =
+            '<span class="fc-title">' +
+                (util_1.htmlEscape(eventDef.title || '') || '&nbsp;') + // we always want one line of height
+                '</span>';
+        return '<a class="' + classes.join(' ') + '"' +
+            (eventDef.url ?
+                ' href="' + util_1.htmlEscape(eventDef.url) + '"' :
+                '') +
+            (skinCss ?
+                ' style="' + skinCss + '"' :
+                '') +
+            '>' +
+            '<div class="fc-content">' +
+            (this.dayGrid.isRTL ?
+                titleHtml + ' ' + timeHtml : // put a natural space in between
+                timeHtml + ' ' + titleHtml //
+            ) +
+            '</div>' +
+            (isResizableFromStart ?
+                '<div class="fc-resizer fc-start-resizer" />' :
+                '') +
+            (isResizableFromEnd ?
+                '<div class="fc-resizer fc-end-resizer" />' :
+                '') +
+            '</a>';
+    };
+    return DayGridEventRenderer;
+}(EventRenderer_1.default));
+exports.default = DayGridEventRenderer;
+// Computes whether two segments' columns collide. They are assumed to be in the same row.
+function isDaySegCollision(seg, otherSegs) {
+    var i;
+    var otherSeg;
+    for (i = 0; i < otherSegs.length; i++) {
+        otherSeg = otherSegs[i];
+        if (otherSeg.leftCol <= seg.rightCol &&
+            otherSeg.rightCol >= seg.leftCol) {
+            return true;
+        }
+    }
+    return false;
+}
+// A cmp function for determining the leftmost event
+function compareDaySegCols(a, b) {
+    return a.leftCol - b.leftCol;
+}
+
+
+/***/ }),
+/* 251 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var $ = __webpack_require__(3);
+var HelperRenderer_1 = __webpack_require__(58);
+var DayGridHelperRenderer = /** @class */ (function (_super) {
+    tslib_1.__extends(DayGridHelperRenderer, _super);
+    function DayGridHelperRenderer() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    // Renders a mock "helper" event. `sourceSeg` is the associated internal segment object. It can be null.
+    DayGridHelperRenderer.prototype.renderSegs = function (segs, sourceSeg) {
+        var helperNodes = [];
+        var rowStructs;
+        // TODO: not good to call eventRenderer this way
+        rowStructs = this.eventRenderer.renderSegRows(segs);
+        // inject each new event skeleton into each associated row
+        this.component.rowEls.each(function (row, rowNode) {
+            var rowEl = $(rowNode); // the .fc-row
+            var skeletonEl = $('<div class="fc-helper-skeleton"><table/></div>'); // will be absolutely positioned
+            var skeletonTopEl;
+            var skeletonTop;
+            // If there is an original segment, match the top position. Otherwise, put it at the row's top level
+            if (sourceSeg && sourceSeg.row === row) {
+                skeletonTop = sourceSeg.el.position().top;
+            }
+            else {
+                skeletonTopEl = rowEl.find('.fc-content-skeleton tbody');
+                if (!skeletonTopEl.length) {
+                    skeletonTopEl = rowEl.find('.fc-content-skeleton table');
+                }
+                skeletonTop = skeletonTopEl.position().top;
+            }
+            skeletonEl.css('top', skeletonTop)
+                .find('table')
+                .append(rowStructs[row].tbodyEl);
+            rowEl.append(skeletonEl);
+            helperNodes.push(skeletonEl[0]);
+        });
+        return $(helperNodes); // must return the elements rendered
+    };
+    return DayGridHelperRenderer;
+}(HelperRenderer_1.default));
+exports.default = DayGridHelperRenderer;
+
+
+/***/ }),
+/* 252 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var $ = __webpack_require__(3);
+var FillRenderer_1 = __webpack_require__(57);
+var DayGridFillRenderer = /** @class */ (function (_super) {
+    tslib_1.__extends(DayGridFillRenderer, _super);
+    function DayGridFillRenderer() {
+        var _this = _super !== null && _super.apply(this, arguments) || this;
+        _this.fillSegTag = 'td'; // override the default tag name
+        return _this;
+    }
+    DayGridFillRenderer.prototype.attachSegEls = function (type, segs) {
+        var nodes = [];
+        var i;
+        var seg;
+        var skeletonEl;
+        for (i = 0; i < segs.length; i++) {
+            seg = segs[i];
+            skeletonEl = this.renderFillRow(type, seg);
+            this.component.rowEls.eq(seg.row).append(skeletonEl);
+            nodes.push(skeletonEl[0]);
+        }
+        return nodes;
+    };
+    // Generates the HTML needed for one row of a fill. Requires the seg's el to be rendered.
+    DayGridFillRenderer.prototype.renderFillRow = function (type, seg) {
+        var colCnt = this.component.colCnt;
+        var startCol = seg.leftCol;
+        var endCol = seg.rightCol + 1;
+        var className;
+        var skeletonEl;
+        var trEl;
+        if (type === 'businessHours') {
+            className = 'bgevent';
+        }
+        else {
+            className = type.toLowerCase();
+        }
+        skeletonEl = $('<div class="fc-' + className + '-skeleton">' +
+            '<table><tr/></table>' +
+            '</div>');
+        trEl = skeletonEl.find('tr');
+        if (startCol > 0) {
+            trEl.append('<td colspan="' + startCol + '"/>');
+        }
+        trEl.append(seg.el.attr('colspan', endCol - startCol));
+        if (endCol < colCnt) {
+            trEl.append('<td colspan="' + (colCnt - endCol) + '"/>');
+        }
+        this.component.bookendCells(trEl);
+        return skeletonEl;
+    };
+    return DayGridFillRenderer;
+}(FillRenderer_1.default));
+exports.default = DayGridFillRenderer;
+
+
+/***/ }),
+/* 253 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var BasicViewDateProfileGenerator_1 = __webpack_require__(228);
+var UnzonedRange_1 = __webpack_require__(5);
+var MonthViewDateProfileGenerator = /** @class */ (function (_super) {
+    tslib_1.__extends(MonthViewDateProfileGenerator, _super);
+    function MonthViewDateProfileGenerator() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    // Computes the date range that will be rendered.
+    MonthViewDateProfileGenerator.prototype.buildRenderRange = function (currentUnzonedRange, currentRangeUnit, isRangeAllDay) {
+        var renderUnzonedRange = _super.prototype.buildRenderRange.call(this, currentUnzonedRange, currentRangeUnit, isRangeAllDay);
+        var start = this.msToUtcMoment(renderUnzonedRange.startMs, isRangeAllDay);
+        var end = this.msToUtcMoment(renderUnzonedRange.endMs, isRangeAllDay);
+        var rowCnt;
+        // ensure 6 weeks
+        if (this.opt('fixedWeekCount')) {
+            rowCnt = Math.ceil(// could be partial weeks due to hiddenDays
+            end.diff(start, 'weeks', true) // dontRound=true
+            );
+            end.add(6 - rowCnt, 'weeks');
+        }
+        return new UnzonedRange_1.default(start, end);
+    };
+    return MonthViewDateProfileGenerator;
+}(BasicViewDateProfileGenerator_1.default));
+exports.default = MonthViewDateProfileGenerator;
+
+
+/***/ }),
+/* 254 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var util_1 = __webpack_require__(4);
+var EventRenderer_1 = __webpack_require__(42);
+var ListEventRenderer = /** @class */ (function (_super) {
+    tslib_1.__extends(ListEventRenderer, _super);
+    function ListEventRenderer() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    ListEventRenderer.prototype.renderFgSegs = function (segs) {
+        if (!segs.length) {
+            this.component.renderEmptyMessage();
+        }
+        else {
+            this.component.renderSegList(segs);
+        }
+    };
+    // generates the HTML for a single event row
+    ListEventRenderer.prototype.fgSegHtml = function (seg) {
+        var view = this.view;
+        var calendar = view.calendar;
+        var theme = calendar.theme;
+        var eventFootprint = seg.footprint;
+        var eventDef = eventFootprint.eventDef;
+        var componentFootprint = eventFootprint.componentFootprint;
+        var url = eventDef.url;
+        var classes = ['fc-list-item'].concat(this.getClasses(eventDef));
+        var bgColor = this.getBgColor(eventDef);
+        var timeHtml;
+        if (componentFootprint.isAllDay) {
+            timeHtml = view.getAllDayHtml();
+        }
+        else if (view.isMultiDayRange(componentFootprint.unzonedRange)) {
+            if (seg.isStart || seg.isEnd) {
+                timeHtml = util_1.htmlEscape(this._getTimeText(calendar.msToMoment(seg.startMs), calendar.msToMoment(seg.endMs), componentFootprint.isAllDay));
+            }
+            else {
+                timeHtml = view.getAllDayHtml();
+            }
+        }
+        else {
+            // Display the normal time text for the *event's* times
+            timeHtml = util_1.htmlEscape(this.getTimeText(eventFootprint));
+        }
+        if (url) {
+            classes.push('fc-has-url');
+        }
+        return '<tr class="' + classes.join(' ') + '">' +
+            (this.displayEventTime ?
+                '<td class="fc-list-item-time ' + theme.getClass('widgetContent') + '">' +
+                    (timeHtml || '') +
+                    '</td>' :
+                '') +
+            '<td class="fc-list-item-marker ' + theme.getClass('widgetContent') + '">' +
+            '<span class="fc-event-dot"' +
+            (bgColor ?
+                ' style="background-color:' + bgColor + '"' :
+                '') +
+            '></span>' +
+            '</td>' +
+            '<td class="fc-list-item-title ' + theme.getClass('widgetContent') + '">' +
+            '<a' + (url ? ' href="' + util_1.htmlEscape(url) + '"' : '') + '>' +
+            util_1.htmlEscape(eventDef.title || '') +
+            '</a>' +
+            '</td>' +
+            '</tr>';
+    };
+    // like "4:00am"
+    ListEventRenderer.prototype.computeEventTimeFormat = function () {
+        return this.opt('mediumTimeFormat');
+    };
+    return ListEventRenderer;
+}(EventRenderer_1.default));
+exports.default = ListEventRenderer;
+
+
+/***/ }),
+/* 255 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var $ = __webpack_require__(3);
+var EventPointing_1 = __webpack_require__(59);
+var ListEventPointing = /** @class */ (function (_super) {
+    tslib_1.__extends(ListEventPointing, _super);
+    function ListEventPointing() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    // for events with a url, the whole <tr> should be clickable,
+    // but it's impossible to wrap with an <a> tag. simulate this.
+    ListEventPointing.prototype.handleClick = function (seg, ev) {
+        var url;
+        _super.prototype.handleClick.call(this, seg, ev); // might prevent the default action
+        // not clicking on or within an <a> with an href
+        if (!$(ev.target).closest('a[href]').length) {
+            url = seg.footprint.eventDef.url;
+            if (url && !ev.isDefaultPrevented()) {
+                window.location.href = url; // simulate link click
+            }
+        }
+    };
+    return ListEventPointing;
+}(EventPointing_1.default));
+exports.default = ListEventPointing;
+
+
+/***/ }),
+/* 256 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var EventSourceParser_1 = __webpack_require__(38);
+var ArrayEventSource_1 = __webpack_require__(52);
+var FuncEventSource_1 = __webpack_require__(215);
+var JsonFeedEventSource_1 = __webpack_require__(216);
+EventSourceParser_1.default.registerClass(ArrayEventSource_1.default);
+EventSourceParser_1.default.registerClass(FuncEventSource_1.default);
+EventSourceParser_1.default.registerClass(JsonFeedEventSource_1.default);
+
+
+/***/ }),
+/* 257 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var ThemeRegistry_1 = __webpack_require__(51);
+var StandardTheme_1 = __webpack_require__(213);
+var JqueryUiTheme_1 = __webpack_require__(214);
+var Bootstrap3Theme_1 = __webpack_require__(258);
+var Bootstrap4Theme_1 = __webpack_require__(259);
+ThemeRegistry_1.defineThemeSystem('standard', StandardTheme_1.default);
+ThemeRegistry_1.defineThemeSystem('jquery-ui', JqueryUiTheme_1.default);
+ThemeRegistry_1.defineThemeSystem('bootstrap3', Bootstrap3Theme_1.default);
+ThemeRegistry_1.defineThemeSystem('bootstrap4', Bootstrap4Theme_1.default);
+
+
+/***/ }),
+/* 258 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var Theme_1 = __webpack_require__(19);
+var Bootstrap3Theme = /** @class */ (function (_super) {
+    tslib_1.__extends(Bootstrap3Theme, _super);
+    function Bootstrap3Theme() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    return Bootstrap3Theme;
+}(Theme_1.default));
+exports.default = Bootstrap3Theme;
+Bootstrap3Theme.prototype.classes = {
+    widget: 'fc-bootstrap3',
+    tableGrid: 'table-bordered',
+    tableList: 'table',
+    tableListHeading: 'active',
+    buttonGroup: 'btn-group',
+    button: 'btn btn-default',
+    stateActive: 'active',
+    stateDisabled: 'disabled',
+    today: 'alert alert-info',
+    popover: 'panel panel-default',
+    popoverHeader: 'panel-heading',
+    popoverContent: 'panel-body',
+    // day grid
+    // for left/right border color when border is inset from edges (all-day in agenda view)
+    // avoid `panel` class b/c don't want margins/radius. only border color.
+    headerRow: 'panel-default',
+    dayRow: 'panel-default',
+    // list view
+    listView: 'panel panel-default'
+};
+Bootstrap3Theme.prototype.baseIconClass = 'glyphicon';
+Bootstrap3Theme.prototype.iconClasses = {
+    close: 'glyphicon-remove',
+    prev: 'glyphicon-chevron-left',
+    next: 'glyphicon-chevron-right',
+    prevYear: 'glyphicon-backward',
+    nextYear: 'glyphicon-forward'
+};
+Bootstrap3Theme.prototype.iconOverrideOption = 'bootstrapGlyphicons';
+Bootstrap3Theme.prototype.iconOverrideCustomButtonOption = 'bootstrapGlyphicon';
+Bootstrap3Theme.prototype.iconOverridePrefix = 'glyphicon-';
+
+
+/***/ }),
+/* 259 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var tslib_1 = __webpack_require__(2);
+var Theme_1 = __webpack_require__(19);
+var Bootstrap4Theme = /** @class */ (function (_super) {
+    tslib_1.__extends(Bootstrap4Theme, _super);
+    function Bootstrap4Theme() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    return Bootstrap4Theme;
+}(Theme_1.default));
+exports.default = Bootstrap4Theme;
+Bootstrap4Theme.prototype.classes = {
+    widget: 'fc-bootstrap4',
+    tableGrid: 'table-bordered',
+    tableList: 'table',
+    tableListHeading: 'table-active',
+    buttonGroup: 'btn-group',
+    button: 'btn btn-primary',
+    stateActive: 'active',
+    stateDisabled: 'disabled',
+    today: 'alert alert-info',
+    popover: 'card card-primary',
+    popoverHeader: 'card-header',
+    popoverContent: 'card-body',
+    // day grid
+    // for left/right border color when border is inset from edges (all-day in agenda view)
+    // avoid `table` class b/c don't want margins/padding/structure. only border color.
+    headerRow: 'table-bordered',
+    dayRow: 'table-bordered',
+    // list view
+    listView: 'card card-primary'
+};
+Bootstrap4Theme.prototype.baseIconClass = 'fa';
+Bootstrap4Theme.prototype.iconClasses = {
+    close: 'fa-times',
+    prev: 'fa-chevron-left',
+    next: 'fa-chevron-right',
+    prevYear: 'fa-angle-double-left',
+    nextYear: 'fa-angle-double-right'
+};
+Bootstrap4Theme.prototype.iconOverrideOption = 'bootstrapFontAwesome';
+Bootstrap4Theme.prototype.iconOverrideCustomButtonOption = 'bootstrapFontAwesome';
+Bootstrap4Theme.prototype.iconOverridePrefix = 'fa-';
+
+
+/***/ }),
+/* 260 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var ViewRegistry_1 = __webpack_require__(22);
+var BasicView_1 = __webpack_require__(62);
+var MonthView_1 = __webpack_require__(229);
+ViewRegistry_1.defineView('basic', {
+    'class': BasicView_1.default
+});
+ViewRegistry_1.defineView('basicDay', {
+    type: 'basic',
+    duration: { days: 1 }
+});
+ViewRegistry_1.defineView('basicWeek', {
+    type: 'basic',
+    duration: { weeks: 1 }
+});
+ViewRegistry_1.defineView('month', {
+    'class': MonthView_1.default,
+    duration: { months: 1 },
+    defaults: {
+        fixedWeekCount: true
+    }
+});
+
+
+/***/ }),
+/* 261 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var ViewRegistry_1 = __webpack_require__(22);
+var AgendaView_1 = __webpack_require__(226);
+ViewRegistry_1.defineView('agenda', {
+    'class': AgendaView_1.default,
+    defaults: {
+        allDaySlot: true,
+        slotDuration: '00:30:00',
+        slotEventOverlap: true // a bad name. confused with overlap/constraint system
+    }
+});
+ViewRegistry_1.defineView('agendaDay', {
+    type: 'agenda',
+    duration: { days: 1 }
+});
+ViewRegistry_1.defineView('agendaWeek', {
+    type: 'agenda',
+    duration: { weeks: 1 }
+});
+
+
+/***/ }),
+/* 262 */
+/***/ (function(module, exports, __webpack_require__) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+var ViewRegistry_1 = __webpack_require__(22);
+var ListView_1 = __webpack_require__(230);
+ViewRegistry_1.defineView('list', {
+    'class': ListView_1.default,
+    buttonTextKey: 'list',
+    defaults: {
+        buttonText: 'list',
+        listDayFormat: 'LL',
+        noEventsMessage: 'No events to display'
+    }
+});
+ViewRegistry_1.defineView('listDay', {
+    type: 'list',
+    duration: { days: 1 },
+    defaults: {
+        listDayFormat: 'dddd' // day-of-week is all we need. full date is probably in header
+    }
+});
+ViewRegistry_1.defineView('listWeek', {
+    type: 'list',
+    duration: { weeks: 1 },
+    defaults: {
+        listDayFormat: 'dddd',
+        listDayAltFormat: 'LL'
+    }
+});
+ViewRegistry_1.defineView('listMonth', {
+    type: 'list',
+    duration: { month: 1 },
+    defaults: {
+        listDayAltFormat: 'dddd' // day-of-week is nice-to-have
+    }
+});
+ViewRegistry_1.defineView('listYear', {
+    type: 'list',
+    duration: { year: 1 },
+    defaults: {
+        listDayAltFormat: 'dddd' // day-of-week is nice-to-have
+    }
+});
+
+
+/***/ }),
+/* 263 */
+/***/ (function(module, exports) {
+
+Object.defineProperty(exports, "__esModule", { value: true });
+
+
+/***/ })
+/******/ ]);
+});
