@@ -10,7 +10,7 @@
 		define(["moment", "jquery"], factory);
 	else if(typeof exports === 'object')
 		exports["FullCalendar"] = factory(require("moment"), require("jquery"));
-	else
+	else;
 		root["FullCalendar"] = factory(root["moment"], root["jQuery"]);
 })(typeof self !== 'undefined' ? self : this, function(__WEBPACK_EXTERNAL_MODULE_0__, __WEBPACK_EXTERNAL_MODULE_3__) {
 return /******/ (function(modules) { // webpackBootstrap
@@ -4532,6 +4532,9 @@ var EventRenderer = /** @class */ (function () {
         var cf2 = f2.componentFootprint;
         var r1 = cf1.unzonedRange;
         var r2 = cf2.unzonedRange;
+        if (this.view.eventOrderSpecs) {
+          return util_1.compareByFieldSpecs(f1.eventDef, f2.eventDef, this.view.eventOrderSpecs, f1.eventDef.miscProps, f2.eventDef.miscProps);
+        }
         return r1.startMs - r2.startMs || // earlier events go first
             (r2.endMs - r2.startMs) - (r1.endMs - r1.startMs) || // tie? longer events go first
             cf2.isAllDay - cf1.isAllDay || // tie? put all-day events first (booleans cast to 0/1)
